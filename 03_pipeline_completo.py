@@ -1,5 +1,3 @@
-from ast import Raise
-from http import client
 from pathlib import Path
 from time import perf_counter
 import re
@@ -29,16 +27,18 @@ OVERLAP_CHUNK = 150
 TAMANHO_LOTE = 32
 TOP_K = 3
 
-# Use "similaridade" ou mmr.
+# Modos disponíveis: "similaridade" ou "mmr".
 MODO_BUSCA = "similaridade"
 
-# O MMR recupera primeiro um conjunto maior de candidatos
-# e seleciona k resultados equilibrando relevância e diversidade.
+# No MMR, primeiro recuperamos um conjunto maior de candidatos.
 FETCH_K_MMR = 12
+
+# Próximo de 1: prioriza relevância.
+# Menor: aumenta a diversidade.
 LAMBDA_MMR = 0.6
 
 # Na primeira execução, deixe True.
-# Depois, altere para False para persistência.
+# Depois, altere para False para demonstrar persistência.
 RECRIAR_COLECAO = True
 
 
@@ -101,7 +101,7 @@ def carregar_pdfs(pasta: Path) -> list[dict]:
 
 
 # ============================================================
-# TODO 1 — CHUNKING.
+# CHUNKING
 # ============================================================
 
 def gerar_chunks(
@@ -109,35 +109,19 @@ def gerar_chunks(
     tamanho: int = TAMANHO_CHUNK,
     overlap: int = OVERLAP_CHUNK,
 ) -> list[str]:
-    
-    """
-    Divida o texto em janelas de caracteres.
-
-    Requisitos:
-    1. overlap deve ser menor que tamanho;
-    2. use passo = tamanho - overlap;
-    3. ignore chunks vazios;
-    4. retorne uma lista de strings.
-    """
-
-    # TODO 1.1: validar tamanho e overlap.
-    # TODO 1.2: criar a lista de chunks.
-    # TODO 1.3: percorrer o texto usando uma janela.
-    # TODO 1.4: avançar pelo passo correto.
-    # TODO 1.5: retornar os chunks.
-
-
     if tamanho <= 0:
         raise ValueError(
             "O tamanho do chunk deve ser maior que zero."
         )
+
     if overlap < 0:
         raise ValueError(
-            "O overlap deve ser maior que zero."
+            "O overlap não pode ser negativo."
         )
+
     if overlap >= tamanho:
         raise ValueError(
-            "O overlap deve ser menor que o tamanho do chunk."
+            "O overlap deve ser menor que o tamanho."
         )
 
     chunks = []
@@ -145,13 +129,13 @@ def gerar_chunks(
     passo = tamanho - overlap
 
     while inicio < len(texto):
-        fim = inicio + tamanho
+        fim = min(inicio + tamanho, len(texto))
         chunk = texto[inicio:fim].strip()
+
         if chunk:
             chunks.append(chunk)
-        inicio += passo
 
-    
+        inicio += passo
 
     return chunks
 
@@ -192,8 +176,7 @@ def preparar_chunks(paginas: list[dict]) -> list[dict]:
 
 
 # ============================================================
-# TODO 2 — BANCO VETORIAL
-# Criar a coleção com distância de cosseno.
+# BANCO VETORIAL
 # ============================================================
 
 def criar_colecao(recriar: bool):
@@ -206,27 +189,27 @@ def criar_colecao(recriar: bool):
     if recriar:
         try:
             client.delete_collection(NOME_COLECAO)
+            print(
+                f"Coleção anterior removida: {NOME_COLECAO}"
+            )
         except Exception:
             # A coleção ainda pode não existir.
             pass
 
-    # TODO 2.1: usar get_or_create_collection.
-    # TODO 2.2: definir a configuração HNSW com space="cosine".
-    # configuration={"hnsw": {"space": "cosine"}}
-    
     collection = client.get_or_create_collection(
         name=NOME_COLECAO,
-        metadata={"description": "Coleção de documentos acadêmicos."},
-        configuration={"hnsw": {"space": "cosine"}}
+        configuration={
+            "hnsw": {
+                "space": "cosine",
+            }
+        },
     )
-
-
 
     return collection
 
 
 # ============================================================
-# TODO 3 — EMBEDDINGS E INDEXAÇÃO
+# EMBEDDINGS E INDEXAÇÃO
 # ============================================================
 
 def indexar_chunks(
@@ -234,7 +217,6 @@ def indexar_chunks(
     modelo: SentenceTransformer,
     chunks: list[dict],
 ) -> None:
-    
     if not chunks:
         raise ValueError("Não existem chunks para indexar.")
 
@@ -247,26 +229,12 @@ def indexar_chunks(
 
         textos = [chunk["texto"] for chunk in lote]
 
-        # TODO 3.1:
-        # Gere os embeddings de todos os textos do lote.
-        # Use:
-        # - batch_size=TAMANHO_LOTE
-        # - normalize_embeddings=True
-        # - show_progress_bar=False
         embeddings = modelo.encode(
             textos,
             batch_size=TAMANHO_LOTE,
             normalize_embeddings=True,
             show_progress_bar=False,
         )
-
-        # TODO 3.2:
-        # Grave o lote usando collection.upsert().
-        # Envie:
-        # - ids;
-        # - embeddings;
-        # - documents;
-        # - metadatas com arquivo, página e número do chunk.
 
         collection.upsert(
             ids=[chunk["id"] for chunk in lote],
@@ -277,22 +245,24 @@ def indexar_chunks(
                     "arquivo": chunk["arquivo"],
                     "pagina": chunk["pagina"],
                     "numero_chunk": chunk["numero_chunk"],
+                    "tamanho_caracteres": len(
+                        chunk["texto"]
+                    ),
                 }
                 for chunk in lote
             ],
         )
 
-        # raise NotImplementedError(
-        #     "Implementar."
-        # )
+        print(f"Indexados: {fim}/{total}")
 
     tempo = perf_counter() - inicio_total
+
     print(f"Indexação concluída em {tempo:.2f} s.")
     print(f"Registros na coleção: {collection.count()}")
 
 
 # ============================================================
-# TODO 4 — BUSCA VETORIAL
+# BUSCA VETORIAL
 # ============================================================
 
 def buscar(
@@ -301,38 +271,47 @@ def buscar(
     pergunta: str,
     k: int = TOP_K,
 ) -> dict:
-    
     pergunta = pergunta.strip()
 
-    # if not pergunta:
-    #     raise ValueError("A pergunta não pode estar vazia.")
+    if not pergunta:
+        raise ValueError("A pergunta não pode estar vazia.")
 
-    # TODO 4.1:
-    # Gere o embedding normalizado da pergunta.
     total_registros = collection.count()
-    # if total_registros == 0:
-    #     Raise RuntimeError(
-    #         "A coleção está vazia. "
-    #         "Execute a indexação antes de buscar."
-    #     )
 
-    # TODO 4.2:
-    # Execute collection.query() com:
-    # - query_embeddings;
-    # - n_results=k;
-    # - include=["documents", "metadatas", "distances"].
+    if total_registros == 0:
+        raise RuntimeError("A coleção está vazia.")
 
-    # TODO 4.3:
-    # Meça a latência usando perf_counter() e inclua
-    # resultados["latencia_ms"] e resultados["pergunta"].
+    k_real = min(k, total_registros)
 
-    raise NotImplementedError(
-        "Implemente buscar()."
+    embedding_pergunta = modelo.encode(
+        pergunta,
+        normalize_embeddings=True,
+    ).tolist()
+
+    inicio = perf_counter()
+
+    resultados = collection.query(
+        query_embeddings=[embedding_pergunta],
+        n_results=k_real,
+        include=[
+            "documents",
+            "metadatas",
+            "distances",
+        ],
     )
+
+    resultados["latencia_ms"] = (
+        perf_counter() - inicio
+    ) * 1000
+
+    resultados["pergunta"] = pergunta
+    resultados["metodo"] = "similaridade"
+
+    return resultados
 
 
 # ============================================================
-# TODO 6 — EXTENSÃO: MAXIMAL MARGINAL RELEVANCE
+# MAXIMAL MARGINAL RELEVANCE
 # ============================================================
 
 def buscar_mmr(
@@ -345,23 +324,150 @@ def buscar_mmr(
 ) -> dict:
     """
     Recupera fetch_k candidatos por similaridade e seleciona k
-    resultados equilibrando relevância e diversidade.
-
-    Fórmula:
-        lambda * sim(chunk, pergunta)
-        - (1 - lambda) * max sim(chunk, selecionados)
+    resultados equilibrando relevância para a pergunta e
+    diversidade em relação aos chunks já escolhidos.
     """
 
-    # TODO 6.1: validar pergunta, k, fetch_k e lambda_mult.
-    # TODO 6.2: gerar o embedding normalizado da pergunta.
-    # TODO 6.3: consultar fetch_k candidatos, incluindo embeddings.
-    # TODO 6.4: selecionar primeiro o candidato mais relevante.
-    # TODO 6.5: selecionar os demais penalizando redundância.
-    # TODO 6.6: devolver os resultados no mesmo formato de buscar().
+    pergunta = pergunta.strip()
 
-    raise NotImplementedError(
-        "Implemente buscar_mmr()"
+    if not pergunta:
+        raise ValueError(
+            "A pergunta não pode estar vazia."
+        )
+
+    if k <= 0:
+        raise ValueError(
+            "k deve ser maior que zero."
+        )
+
+    if fetch_k < k:
+        raise ValueError(
+            "fetch_k deve ser maior ou igual a k."
+        )
+
+    if not 0 <= lambda_mult <= 1:
+        raise ValueError(
+            "lambda_mult deve estar entre 0 e 1."
+        )
+
+    total_registros = collection.count()
+
+    if total_registros == 0:
+        raise RuntimeError(
+            "A coleção está vazia."
+        )
+
+    k_real = min(k, total_registros)
+    fetch_k_real = min(
+        max(fetch_k, k_real),
+        total_registros,
     )
+
+    embedding_pergunta = modelo.encode(
+        pergunta,
+        normalize_embeddings=True,
+    )
+
+    inicio = perf_counter()
+
+    candidatos = collection.query(
+        query_embeddings=[
+            embedding_pergunta.tolist()
+        ],
+        n_results=fetch_k_real,
+        include=[
+            "documents",
+            "metadatas",
+            "distances",
+            "embeddings",
+        ],
+    )
+
+    ids = candidatos["ids"][0]
+    documentos = candidatos["documents"][0]
+    metadados = candidatos["metadatas"][0]
+    embeddings = np.asarray(
+        candidatos["embeddings"][0],
+        dtype=np.float32,
+    )
+
+    # Os embeddings foram normalizados durante a indexação.
+    # O produto escalar corresponde à similaridade de cosseno.
+    relevancias = embeddings @ embedding_pergunta
+
+    selecionados = [
+        int(np.argmax(relevancias))
+    ]
+
+    while (
+        len(selecionados) < k_real
+        and len(selecionados) < len(ids)
+    ):
+        melhor_indice = None
+        melhor_score = float("-inf")
+
+        for indice in range(len(ids)):
+            if indice in selecionados:
+                continue
+
+            redundancias = (
+                embeddings[selecionados]
+                @ embeddings[indice]
+            )
+
+            maior_redundancia = float(
+                np.max(redundancias)
+            )
+
+            score_mmr = (
+                lambda_mult
+                * float(relevancias[indice])
+                - (1 - lambda_mult)
+                * maior_redundancia
+            )
+
+            if score_mmr > melhor_score:
+                melhor_score = score_mmr
+                melhor_indice = indice
+
+        if melhor_indice is None:
+            break
+
+        selecionados.append(melhor_indice)
+
+    latencia_ms = (
+        perf_counter() - inicio
+    ) * 1000
+
+    similaridades_selecionadas = [
+        float(relevancias[indice])
+        for indice in selecionados
+    ]
+
+    # Mantém o formato usado por imprimir_resultados().
+    resultados = {
+        "ids": [[ids[indice] for indice in selecionados]],
+        "documents": [[
+            documentos[indice]
+            for indice in selecionados
+        ]],
+        "metadatas": [[
+            metadados[indice]
+            for indice in selecionados
+        ]],
+        "distances": [[
+            1 - similaridade
+            for similaridade
+            in similaridades_selecionadas
+        ]],
+        "latencia_ms": latencia_ms,
+        "pergunta": pergunta,
+        "metodo": "MMR",
+        "lambda_mmr": lambda_mult,
+        "fetch_k": fetch_k_real,
+    }
+
+    return resultados
 
 
 # ============================================================
@@ -376,6 +482,10 @@ def imprimir_resultados(resultados: dict) -> None:
 
     print("\n" + "#" * 80)
     print(f"Pergunta: {resultados['pergunta']}")
+    print(
+        f"Método: "
+        f"{resultados.get('metodo', 'similaridade')}"
+    )
     print(
         "Latência da busca: "
         f"{resultados['latencia_ms']:.2f} ms"
@@ -396,6 +506,8 @@ def imprimir_resultados(resultados: dict) -> None:
         ),
         start=1,
     ):
+        # Para a métrica de cosseno usada pelo Chroma:
+        # distância = 1 - similaridade de cosseno.
         similaridade = 1 - distancia
 
         print("\n" + "=" * 80)
@@ -415,69 +527,91 @@ def imprimir_resultados(resultados: dict) -> None:
 # ============================================================
 
 def main() -> None:
-    print("1. Carregando PDFs...")
-    paginas = carregar_pdfs(PASTA_DOCUMENTOS)
-    print(f"Páginas com texto: {len(paginas)}")
+    try:
+        print("1. Carregando PDFs...")
+        paginas = carregar_pdfs(PASTA_DOCUMENTOS)
+        print(f"Páginas com texto: {len(paginas)}")
 
-    print("\n2. Gerando chunks...")
-    chunks = preparar_chunks(paginas)
-    print(f"Total de chunks: {len(chunks)}")
+        print("\n2. Gerando chunks...")
+        chunks = preparar_chunks(paginas)
+        print(f"Total de chunks: {len(chunks)}")
 
-    print("\n3. Carregando o modelo de embeddings...")
+        print("\n3. Carregando o modelo de embeddings...")
+        modelo = SentenceTransformer(MODELO_EMBEDDING)
 
-    # TODO 5:
-    # Crie o objeto SentenceTransformer usando
-    # a constante MODELO_EMBEDDING.
+        print(f"Modelo: {MODELO_EMBEDDING}")
+        print(
+            "Dimensão dos embeddings: "
+            f"{modelo.get_sentence_embedding_dimension()}"
+        )
 
-    raise NotImplementedError(
-        "Carregue o modelo"
-    )
+        print("\n4. Preparando a coleção...")
+        collection = criar_colecao(
+            recriar=RECRIAR_COLECAO
+        )
 
-    # Depois de preencher o TODO 5, remova o raise acima
-    # e descomente o restante desta função.
+        if RECRIAR_COLECAO or collection.count() == 0:
+            print("\n5. Indexando os chunks...")
+            indexar_chunks(
+                collection,
+                modelo,
+                chunks,
+            )
+        else:
+            print(
+                "\nColeção persistente reutilizada. "
+                f"Registros: {collection.count()}"
+            )
 
-    # collection = criar_colecao(
-    #     recriar=RECRIAR_COLECAO
-    # )
+        print("\n6. Busca interativa")
 
-    # if RECRIAR_COLECAO or collection.count() == 0:
-    #     indexar_chunks(collection, modelo, chunks)
-    # else:
-    #     print(
-    #         "Coleção persistente reutilizada. "
-    #         f"Registros: {collection.count()}"
-    #     )
+        while True:
+            pergunta = input(
+                "\nDigite sua pergunta ou 'sair': "
+            ).strip()
 
-    # while True:
-    #     pergunta = input(
-    #         "\nDigite sua pergunta ou 'sair': "
-    #     ).strip()
+            if pergunta.lower() == "sair":
+                print("Programa encerrado.")
+                break
 
-    #     if pergunta.lower() == "sair":
-    #         break
+            if not pergunta:
+                print("Digite uma pergunta válida.")
+                continue
 
-    #     if not pergunta:
-    #         print("Digite uma pergunta válida.")
-    #         continue
+            if MODO_BUSCA == "mmr":
+                resultados = buscar_mmr(
+                    collection,
+                    modelo,
+                    pergunta,
+                    k=TOP_K,
+                    fetch_k=FETCH_K_MMR,
+                    lambda_mult=LAMBDA_MMR,
+                )
+            else:
+                resultados = buscar(
+                    collection,
+                    modelo,
+                    pergunta,
+                    k=TOP_K,
+                )
 
-    #     if MODO_BUSCA == "mmr":
-    #         resultados = buscar_mmr(
-    #             collection,
-    #             modelo,
-    #             pergunta,
-    #             k=TOP_K,
-    #             fetch_k=FETCH_K_MMR,
-    #             lambda_mult=LAMBDA_MMR,
-    #         )
-    #     else:
-    #         resultados = buscar(
-    #             collection,
-    #             modelo,
-    #             pergunta,
-    #             k=TOP_K,
-    #         )
+            imprimir_resultados(resultados)
 
-    #     imprimir_resultados(resultados)
+    except KeyboardInterrupt:
+        print("\nPrograma interrompido.")
+
+    except (
+        FileNotFoundError,
+        ValueError,
+        RuntimeError,
+    ) as erro:
+        print(f"\nErro: {erro}")
+
+    except Exception as erro:
+        print(
+            "\nErro inesperado: "
+            f"{type(erro).__name__}: {erro}"
+        )
 
 
 if __name__ == "__main__":
